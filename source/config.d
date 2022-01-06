@@ -1,3 +1,3 @@
 module config;
 
-__gshared string dubPath = `dub`;
+__gshared string dubPath = `E:\dev\dub\bin\dub.exe`;

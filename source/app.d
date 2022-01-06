@@ -1,6 +1,6 @@
 import std;
 
-import config, target;
+import mkalias, builder, config, target;
 
 int main(string[] args)
 {
@@ -19,17 +19,20 @@ int main(string[] args)
 	auto dmdNew = args[dashes + 1];
 	auto dmdNewArgs = args[dashes + 2 .. $];
 
+	auto dmdOldWrapper = makeAlias(dmdOld, dmdOldArgs);
+	auto dmdNewWrapper = makeAlias(dmdNew, dmdNewArgs);
+
 	if (!exists(projectsDir))
 	{
 		writeln("Specified projects folder doesn't exist");
 		return 1;
 	}
 
-	foreach (project; dirEntries(projectsDir, SpanMode.shallow).parallel)
+	foreach (project; dirEntries(projectsDir, SpanMode.shallow).array.parallel)
 	{
 		if (project.isDir)
 		{
-			doProject(project, dmdOld, dmdOldArgs, dmdNew, dmdNewArgs);
+			doProject(project, dmdOldWrapper, dmdNewWrapper);
 		}
 	}
 
@@ -43,22 +46,24 @@ enum Build
 	run = 1 << 1, // run program
 }
 
-void doProject(string cwd, string dmdOld, string[] dmdOldArgs, string dmdNew, string[] dmdNewArgs)
+void doProject(string cwd, string dmdOld, string dmdNew)
 {
-	compare(Build.test | Build.run, cwd, dmdOld, dmdOldArgs, dmdNew, dmdNewArgs);
+	compare(Build.test | Build.run, cwd, dmdOld, dmdNew);
 }
 
-void compare(Build buildTypes, string cwd, string dmdOld, string[] dmdOldArgs, string dmdNew, string[] dmdNewArgs)
+void compare(Build buildTypes, string cwd, string dmdOld, string dmdNew)
 {
 	foreach (target; cwd.determineTargets)
-		compare(buildTypes, target, dmdOld, dmdOldArgs, dmdNew, dmdNewArgs);
+		compare(buildTypes, target, dmdOld, dmdNew);
 }
 
-void compare(Build buildTypes, CompileTarget target, string dmdOld, string[] dmdOldArgs, string dmdNew, string[] dmdNewArgs)
+void compare(Build buildTypes, CompileTarget target, string dmdOld, string dmdNew)
 {
 	BitFlags!Build buildTypeFlags = buildTypes;
 
-	if (target.match!(v => v.isBuildable))
+	if (buildTypeFlags.run && target.match!(v => v.isRunnable))
+		writeln("RUN ", target);
+	else if (target.match!(v => v.isBuildable))
 		writeln("BUILD ", target);
 	else
 		writeln("SKIP ", target);
@@ -66,12 +71,15 @@ void compare(Build buildTypes, CompileTarget target, string dmdOld, string[] dmd
 	if (buildTypeFlags.test && target.match!(v => v.isTestable))
 		writeln("TEST ", target);
 
-	if (buildTypeFlags.run && target.match!(v => v.isRunnable))
-		writeln("RUN ", target);
-
 	foreach (submodule; iterateSubmodules(target))
-		compare(Build.test, submodule, dmdOld, dmdOldArgs, dmdNew, dmdNewArgs);
+		compare(Build.test, submodule, dmdOld, dmdNew);
 
 	foreach (example; findExamples(target))
-		compare(Build.run, example, dmdOld, dmdOldArgs, dmdNew, dmdNewArgs);
+		compare(Build.run, example, dmdOld, dmdNew);
+}
+
+NativeBuilder threadBuilder;
+static this()
+{
+	threadBuilder = new NativeBuilder();
 }

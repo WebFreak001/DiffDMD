@@ -13,6 +13,20 @@ import std.process;
 import std.string;
 import std.sumtype;
 
+struct RecordOptions
+{
+	bool recordStdout = true;
+	bool recordStderr = true;
+	bool recordStatusCode = true;
+	string[string] env = null;
+}
+
+interface Builder
+{
+	int record(string cwd, string program, string[] args, RecordOptions options = RecordOptions.init);
+	void pushFile(string cwd, string file);
+}
+
 struct DubCompileTarget
 {
 	enum TargetType
@@ -33,14 +47,14 @@ struct DubCompileTarget
 
 	string targetPackage;
 	string config;
-	string[] dubArgs;
+	string[] extraDubArgs;
 
 	JSONValue recipe;
 
 	string toString() const @safe pure
 		=> isBuildable
-			? format!"[DUB] %s %s %s %s (%s) -> %s"(directory, targetPackage, dubArgs, config, targetType, targetFile)
-			: format!"[DUB] %s %s (none)"(directory, targetPackage);
+			? format!"[DUB] %s [%(%s %)] (%s) -> %s"(directory, dubArgs, targetType, targetFile)
+			: format!"[DUB] %s [%(%s %)] (none)"(directory, dubArgs);
 
 	bool isBuildable() const @safe pure
 		=> targetType != TargetType.none && targetFile.length;
@@ -50,6 +64,45 @@ struct DubCompileTarget
 
 	bool isRunnable() const @safe pure
 		=> targetType == TargetType.executable && targetFile.length;
+
+	string[] dubArgs(string compiler = null) const @safe pure
+	{
+		string[] ret;
+		if (targetPackage.length)
+			ret ~= targetPackage;
+		if (config.length)
+			ret ~= text("--config=", config);
+		ret ~= extraDubArgs;
+		if (compiler.length)
+			ret ~= text("--compiler=", compiler);
+		return ret;
+	}
+
+	void build(Builder b, string compiler)
+	{
+		b.record(directory, dubPath, ["build"] ~ dubArgs(compiler));
+		if (targetFile.length)
+			b.pushFile(directory, targetFile);
+	}
+
+	void run(Builder b, string compiler)
+	{
+		auto args = ["run"] ~ dubArgs(compiler);
+		if (targetArgs.length)
+			args ~= ["--"] ~ targetArgs;
+		b.record(directory, dubPath, args);
+		if (targetFile.length)
+			b.pushFile(directory, targetFile);
+	}
+
+	void test(Builder b, string compiler)
+	{
+		auto args = ["test"] ~ dubArgs(compiler);
+		if (targetArgs.length)
+			args ~= ["--"] ~ targetArgs;
+		b.record(directory, dubPath, args);
+		// TODO: determine unittest runner executable and record it
+	}
 }
 
 struct RdmdCompileTarget
@@ -71,6 +124,21 @@ struct RdmdCompileTarget
 
 	bool isRunnable() const
 		=> true;
+
+	void build(Builder b, string compiler)
+	{
+		assert(false);
+	}
+
+	void run(Builder b, string compiler)
+	{
+		assert(false);
+	}
+
+	void test(Builder b, string compiler)
+	{
+		assert(false);
+	}
 }
 
 struct DmdICompileTarget
@@ -92,6 +160,21 @@ struct DmdICompileTarget
 
 	bool isRunnable() const
 		=> true;
+
+	void build(Builder b, string compiler)
+	{
+		assert(false);
+	}
+
+	void run(Builder b, string compiler)
+	{
+		assert(false);
+	}
+
+	void test(Builder b, string compiler)
+	{
+		assert(false);
+	}
 }
 
 struct MesonCompileTarget
@@ -111,11 +194,26 @@ struct MesonCompileTarget
 
 	bool isRunnable() const
 		=> true;
+
+	void build(Builder b, string compiler)
+	{
+		assert(false);
+	}
+
+	void run(Builder b, string compiler)
+	{
+		assert(false);
+	}
+
+	void test(Builder b, string compiler)
+	{
+		assert(false);
+	}
 }
 
 alias CompileTarget = SumType!(DubCompileTarget, RdmdCompileTarget, DmdICompileTarget, MesonCompileTarget);
 
-auto iterateSubmodules(return CompileTarget target)
+auto iterateTarget(string method)(return CompileTarget target)
 {
 	static struct S
 	{
@@ -123,7 +221,7 @@ auto iterateSubmodules(return CompileTarget target)
 
 		int opApply(scope int delegate(CompileTarget) dg)
 		{
-			return findSubmodules(target, dg);
+			return mixin(method ~ "(target, dg)");
 		}
 	}
 
@@ -144,16 +242,23 @@ int findSubmodules(CompileTarget target, scope int delegate(CompileTarget) dg)
 				DubCompileTarget[] subTargets;
 				string subName;
 
-				if (subpkg.type == JSONType.string)
+				try
 				{
-					subTargets = parseDubTargets(buildPath(cwd, subpkg.str));
+					if (subpkg.type == JSONType.string)
+					{
+						subTargets = parseDubTargets(buildPath(cwd, subpkg.str));
+					}
+					else if (subpkg.type == JSONType.object)
+					{
+						subTargets = parseDubJSON(cwd, subpkg, base, ":" ~ subpkg["name"].str);
+					}
+					else
+						assert(false, "Invalid subpackage: " ~ subpkg.toString);
 				}
-				else if (subpkg.type == JSONType.object)
+				catch (Exception)
 				{
-					subTargets = parseDubJSON(cwd, subpkg, base, ":" ~ subpkg["name"].str);
+					continue;
 				}
-				else
-					assert(false, "Invalid subpackage: " ~ subpkg.toString);
 
 				foreach (ref subTarget; subTargets)
 				{
@@ -167,6 +272,7 @@ int findSubmodules(CompileTarget target, scope int delegate(CompileTarget) dg)
 		_ => 0
 	);
 }
+alias iterateSubmodules = iterateTarget!"findSubmodules";
 
 CompileTarget[] findExamples(CompileTarget target)
 {
