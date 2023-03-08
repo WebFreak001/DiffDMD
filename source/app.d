@@ -1,5 +1,7 @@
 import std;
 
+import core.atomic;
+
 import mkalias, builder, config, target;
 
 int main(string[] args)
@@ -22,17 +24,33 @@ int main(string[] args)
 	auto dmdOldWrapper = makeAlias(dmdOld, dmdOldArgs);
 	auto dmdNewWrapper = makeAlias(dmdNew, dmdNewArgs);
 
+	writeln("old dmd --version: ", dmdOldWrapper);
+	spawnProcess([dmdOldWrapper, "--version"]).wait;
+	writeln("new dmd --version: ", dmdNewWrapper);
+	spawnProcess([dmdNewWrapper, "--version"]).wait;
+
 	if (!exists(projectsDir))
 	{
 		writeln("Specified projects folder doesn't exist");
 		return 1;
 	}
 
-	foreach (project; dirEntries(projectsDir, SpanMode.shallow).array.parallel)
+	auto allPaths = dirEntries(projectsDir, SpanMode.shallow).filter!(p => p.isDir).array;
+	auto startTime = MonoTimeImpl!(ClockType.coarse).currTime;
+	const total = allPaths.length;
+	shared int counter;
+
+	foreach (project; allPaths.parallel)
 	{
-		if (project.isDir)
+		doProject(project, dmdOldWrapper, dmdNewWrapper);
+		auto i = counter.atomicOp!"+="(1);
+		if (true)
 		{
-			doProject(project, dmdOldWrapper, dmdNewWrapper);
+			auto curTime = MonoTimeImpl!(ClockType.coarse).currTime;
+			auto elapsed = (curTime - startTime).total!"msecs";
+			auto progress = i / cast(double)total;
+			auto remainingSecs = cast(int)((1 - progress) * elapsed / 1000);
+			writeln("\x1b[1mDONE ", i, " / ", total, " - ETA: ", remainingSecs, "s\x1b[m");
 		}
 	}
 
@@ -48,7 +66,8 @@ enum Build
 
 void doProject(string cwd, string dmdOld, string dmdNew)
 {
-	compare(Build.test | Build.run, cwd, dmdOld, dmdNew);
+	compare(Build.buildOnly, cwd, dmdOld, dmdNew);
+	// compare(Build.test | Build.run, cwd, dmdOld, dmdNew);
 }
 
 void compare(Build buildTypes, string cwd, string dmdOld, string dmdNew)
@@ -62,24 +81,51 @@ void compare(Build buildTypes, CompileTarget target, string dmdOld, string dmdNe
 	BitFlags!Build buildTypeFlags = buildTypes;
 
 	if (buildTypeFlags.run && target.match!(v => v.isRunnable))
-		writeln("RUN ", target);
+	{
+		// writeln("RUN ", target);
+		target.runTarget(threadBuilderOld, dmdOld);
+		target.runTarget(threadBuilderNew, dmdNew);
+	}
 	else if (target.match!(v => v.isBuildable))
-		writeln("BUILD ", target);
+	{
+		// writeln("BUILD ", target);
+		target.buildTarget(threadBuilderOld, dmdOld);
+		target.buildTarget(threadBuilderNew, dmdNew);
+	}
 	else
-		writeln("SKIP ", target);
+		// writeln("SKIP ", target);
 
 	if (buildTypeFlags.test && target.match!(v => v.isTestable))
-		writeln("TEST ", target);
+	{
+		// writeln("TEST ", target);
+		target.testTarget(threadBuilderOld, dmdOld);
+		target.testTarget(threadBuilderNew, dmdNew);
+	}
 
-	foreach (submodule; iterateSubmodules(target))
-		compare(Build.test, submodule, dmdOld, dmdNew);
+	if (buildTypeFlags.test)
+		foreach (submodule; iterateSubmodules(target))
+			compare(Build.test, submodule, dmdOld, dmdNew);
 
 	foreach (example; findExamples(target))
-		compare(Build.run, example, dmdOld, dmdNew);
+	{
+		if (buildTypeFlags.run)
+			compare(Build.run, example, dmdOld, dmdNew);
+		else if (buildTypeFlags.test) // only build examples, don't assume they are valid testables
+			compare(Build.buildOnly, example, dmdOld, dmdNew);
+	}
 }
 
-NativeBuilder threadBuilder;
+NativeBuilder threadBuilderOld, threadBuilderNew;
+shared int threadCounter = 0;
 static this()
 {
-	threadBuilder = new NativeBuilder();
+	int count = threadCounter.atomicOp!"+="(1);
+	threadBuilderOld = makeThreadBuilder("old", count);
+	threadBuilderNew = makeThreadBuilder("new", count);
+}
+
+private NativeBuilder makeThreadBuilder(string prefix, int id)
+{
+	auto output = new FileRecorder(File("out_" ~ prefix ~ "_" ~ id.to!string ~ ".log", "w"));
+	return new NativeBuilder(output);
 }
