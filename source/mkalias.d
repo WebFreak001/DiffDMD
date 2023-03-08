@@ -1,6 +1,8 @@
 module mkalias;
 
 import core.atomic;
+import std.algorithm;
+import std.array;
 import std.conv;
 import std.exception;
 import std.file;
@@ -10,6 +12,7 @@ import std.process;
 
 shared int aliasCounter = 0;
 
+/// Aliases `execute([returnPath])` = `execute([program] ~ args)`
 string makeAlias(string program, string[] args)
 {
 	if (args.length == 0)
@@ -27,111 +30,148 @@ string makeAlias(string program, string[] args)
 	return ret;
 }
 
-version (Windows)
 void buildAlias(string output, string program, string[] args)
 {
-	string source = format!q{
-		import core.sys.windows.windows;
+	version (Windows)
+	{
+		string source = format!q{
+			import core.sys.windows.windows;
 
-		static immutable wstring program = %s;
-		static immutable wstring cmdLine = %s;
+			static immutable wstring program = %s;
+			static immutable wstring cmdLine = %s;
 
-		__gshared wchar[32_767] cmdLineConcat = void;
+			__gshared wchar[32_767] cmdLineConcat = void;
 
-		extern (Windows)
-		uint wmainCRTStartup()
-		{
-			auto inCmdLine = GetCommandLineW();
-			size_t progEnd, length;
-			bool inString = false;
-			while (inCmdLine[length])
+			extern (Windows)
+			uint wmainCRTStartup()
 			{
-				if (inCmdLine[length] == '"')
-					inString = !inString;
-				else if (!inString && inCmdLine[length] == ' ' && !progEnd)
-					progEnd = length + 1;
-				length++;
+				auto inCmdLine = GetCommandLineW();
+				size_t progEnd, length;
+				bool inString = false;
+				while (inCmdLine[length])
+				{
+					if (inCmdLine[length] == '"')
+						inString = !inString;
+					else if (!inString && inCmdLine[length] == ' ' && !progEnd)
+						progEnd = length + 1;
+					length++;
+				}
+
+				if (progEnd)
+					length -= progEnd;
+				else
+					length = 0;
+
+				if (length + 1 > cmdLineConcat.length - cmdLine.length)
+					length = cmdLineConcat.length - cmdLine.length - 1; // cut off arguments
+
+				cmdLineConcat.ptr[0 .. cmdLine.length] = cmdLine;
+				cmdLineConcat.ptr[cmdLine.length .. cmdLine.length + length] =
+					inCmdLine[progEnd .. progEnd + length];
+				cmdLineConcat.ptr[cmdLine.length + length] = '\0';
+
+				STARTUPINFOW info = void;
+				info.cb = info.sizeof;
+				info.dwFlags = STARTF_USESTDHANDLES;
+				info.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+				info.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+				info.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+				PROCESS_INFORMATION proc;
+
+				enum INHERIT_PARENT_AFFINITY = 0x00010000;
+
+				if (!CreateProcessW(
+						program.ptr,
+						cmdLineConcat.ptr,
+						null,
+						null,
+						true,
+						INHERIT_PARENT_AFFINITY,
+						null,
+						null,
+						&info,
+						&proc))
+					return -1;
+
+				WaitForSingleObject(proc.hProcess, INFINITE);
+
+				uint exitCode;
+				if (!GetExitCodeProcess(proc.hProcess, &exitCode))
+					return -1;
+
+				return exitCode;
 			}
 
-			if (progEnd)
-				length -= progEnd;
-			else
-				length = 0;
-
-			if (length + 1 > cmdLineConcat.length - cmdLine.length)
-				length = cmdLineConcat.length - cmdLine.length - 1; // cut off arguments
-
-			cmdLineConcat.ptr[0 .. cmdLine.length] = cmdLine;
-			cmdLineConcat.ptr[cmdLine.length .. cmdLine.length + length] =
-				inCmdLine[progEnd .. progEnd + length];
-			cmdLineConcat.ptr[cmdLine.length + length] = '\0';
-
-			STARTUPINFOW info = void;
-			info.cb = info.sizeof;
-			info.dwFlags = STARTF_USESTDHANDLES;
-			info.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-			info.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
-			info.hStdError = GetStdHandle(STD_ERROR_HANDLE);
-			PROCESS_INFORMATION proc;
-
-			enum INHERIT_PARENT_AFFINITY = 0x00010000;
-
-			if (!CreateProcessW(
-					program.ptr,
-					cmdLineConcat.ptr,
-					null,
-					null,
-					true,
-					INHERIT_PARENT_AFFINITY,
-					null,
-					null,
-					&info,
-					&proc))
-				return -1;
-
-			WaitForSingleObject(proc.hProcess, INFINITE);
-
-			uint exitCode;
-			if (!GetExitCodeProcess(proc.hProcess, &exitCode))
-				return -1;
-
-			return exitCode;
-		}
-
-		version(LDC)
-		{
-			extern (C) void _d_array_slice_copy(void* dst, size_t dstlen, void* src, size_t srclen, size_t elemsz)
+			version(LDC)
 			{
-				for (size_t i = 0; i < srclen * elemsz; i++)
-					(cast(ubyte*)dst)[i] = (cast(ubyte*)src)[i];
+				extern (C) void _d_array_slice_copy(void* dst, size_t dstlen, void* src, size_t srclen, size_t elemsz)
+				{
+					for (size_t i = 0; i < srclen * elemsz; i++)
+						(cast(ubyte*)dst)[i] = (cast(ubyte*)src)[i];
+				}
 			}
-		}
 
-		extern(C) void _assert (
-			const(void)* exp,
-			const(void)* file,
-			uint line
-		)
-		{
-			ExitProcess(-1);
-		}
-	}(program.escapeDString, ((program ~ args).escapeShellCommand ~ ' ').escapeDString);
+			extern(C) void _assert (
+				const(void)* exp,
+				const(void)* file,
+				uint line
+			)
+			{
+				ExitProcess(-1);
+			}
+		}(program.escapeDString, ((program ~ args).escapeShellCommand ~ ' ').escapeDString);
 
-	auto p = pipeProcess(
-		[`ldc2.exe`,
-			`-O3`,
-			`--betterC`,
-			`--checkaction=halt`,
-			`-L=/NODEFAULTLIB`,
-			`-L=/ENTRY:wmainCRTStartup`,
-			`-L=/SUBSYSTEM:CONSOLE`,
-			`-of=` ~ output,
-			`-`],
-		Redirect.stdin);
-	p.stdin.writeln(source);
-	p.stdin.close();
+		auto p = pipeProcess(
+			[`ldc2.exe`,
+				`-O3`,
+				`--betterC`,
+				`--checkaction=halt`,
+				`-L=/NODEFAULTLIB`,
+				`-L=/ENTRY:wmainCRTStartup`,
+				`-L=/SUBSYSTEM:CONSOLE`,
+				`-of=` ~ output,
+				`-`],
+			Redirect.stdin);
+		p.stdin.writeln(source);
+		p.stdin.close();
 
-	enforce(p.pid.wait == 0);
+		enforce(p.pid.wait == 0);
+	}
+	else version (Posix)
+	{
+		string source = format!q{
+			import core.stdc.stdlib;
+			import core.sys.posix.unistd;
+
+			static immutable char* program = %s;
+			static immutable char*[] cmdLine = [%s];
+
+			extern(C) void main(int argc, const(char)** argv)
+			{
+				auto args = cast(const(char)**) malloc((const(char)*).sizeof * (argc + cmdLine.length + 1));
+				foreach (i, part; cmdLine)
+					args[i] = part;
+				foreach (i; 1 .. argc)
+					args[cmdLine.length - 1 + i] = argv[i];
+				args[cmdLine.length + argc] = null;
+				execvp(program, args);
+			}
+		}(program.escapeDString, (program ~ args).map!escapeDString.join(", "));
+
+		auto p = pipeProcess(
+			[`ldc2`,
+				`-O3`,
+				`--betterC`,
+				`-of=` ~ output,
+				`-`],
+			Redirect.stdin);
+		p.stdin.writeln(source);
+		p.stdin.close();
+
+		enforce(p.pid.wait == 0);
+	}
+	else
+		static assert(false, "can't spawn processes on this platform");
 }
 
 string escapeDString(string s)
